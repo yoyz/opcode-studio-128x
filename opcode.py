@@ -105,14 +105,6 @@ class OpcodeStudio128X:
         sleep(0.05)
         self.read_all()
 
-    def query_single(self, port_in, port_out):
-        self.read_all()
-        self.send_command('get_routing', bytes([port_in, port_out, 0]))
-        sleep(0.25)
-        resp = self.read_all()
-        additional = self.serial.read(100)
-        return resp + additional
-
     def select_patch(self, patch):
         self.send_command('program_select', bytes([patch]))
         sleep(0.1)
@@ -182,44 +174,6 @@ def encode_patch(port_in, port_out, enable=True):
         channels[1],
         channels[0]
     ]).tobytes()
-
-
-def parse_single_response(data):
-    """Parse response from get_routing query for a single port.
-
-    Response format from device:
-    F0 00 00 37 06 58 <port_in> <port_out> <data...> F7
-    """
-    if not data or len(data) < 8:
-        return 0
-
-    hex_str = data.hex().upper()
-
-    try:
-        idx = hex_str.index('58') + 2
-    except ValueError:
-        return 0
-
-    if idx + 2 > len(hex_str):
-        return 0
-
-    in_port = int(hex_str[idx:idx+2], 16)
-    out_port = int(hex_str[idx+2:idx+4], 16)
-
-    idx += 4
-
-    try:
-        f7_idx = hex_str.index('F7', idx)
-        payload = hex_str[idx:f7_idx]
-    except ValueError:
-        return 0
-
-    if not payload or len(payload) < 4:
-        return 0
-
-    status_byte = int(payload[:2], 16)
-
-    return 1 if status_byte != 0 else 0
 
 
 def parse_bulk_response(data, size=8):
@@ -414,9 +368,6 @@ class MatrixState:
                 if (i, j) not in self.matrix:
                     self.matrix[(i, j)] = False
 
-        self.cursor_row = 0
-        self.cursor_col = 0
-
     def connect_device(self):
         try:
             self.device = OpcodeStudio128X(self.port, init=True)
@@ -503,17 +454,6 @@ class MatrixState:
                 self.device.route(row, col, new_val)
                 sleep(0.005)
         save_matrix(self.matrix)
-
-    def save_patch(self, n):
-        if not self.device or not self.device.serial.isOpen():
-            self.status_message = "Not connected"
-            self.status_time = current_time() + 1
-            return False
-
-        self.device.store_patch(n)
-        self.status_message = f"Saved to patch {n}"
-        self.status_time = current_time() + 2
-        return True
 
     def load_patch(self, n):
         if not self.device or not self.device.serial.isOpen():
@@ -654,13 +594,11 @@ def curses_main(stdscr, port):
 
     height, width = stdscr.getmaxyx()
 
-    state.connect_device()
-
     if not state.is_connected():
-        state.connect_device()
+        if not state.connect_device():
+            state.status_message = "Using offline mode - connect device for live updates"
+            state.status_time = current_time() + 3
 
-    patch_mode = False
-    patch_target = None
     help_mode = False
 
     try:
@@ -782,10 +720,6 @@ def curses_main(stdscr, port):
                     state.status_time = current_time() + 1
                 curses.napms(20)
                 continue
-
-            if key == ord('l') or key == ord('L'):
-                patch_mode = True
-                patch_target = 'l'
 
             if key == ord('r') or key == ord('R'):
                 if state.cursor_row == 0:
@@ -942,7 +876,11 @@ def main():
             print(f"Error: Cannot connect to device: {e}", file=sys.stderr)
             sys.exit(1)
 
+        matrix = load_matrix()
+        for (r, c), enabled in matrix.items():
+            device.route(r, c, enabled)
         device.store_patch(args.save)
+        save_matrix(matrix)
         print(f"Saved to patch {args.save}")
         device.deinit()
         return
