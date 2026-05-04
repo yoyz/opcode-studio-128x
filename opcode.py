@@ -335,11 +335,15 @@ class MatrixState:
         self.status_message = ""
         self.status_time = 0
         self.last_reconnect_attempt = 0
+        self._redraw_needed = False
 
         for i in range(1, 9):
             for j in range(1, 9):
                 if (i, j) not in self.matrix:
                     self.matrix[(i, j)] = False
+
+        self.cursor_row = 0
+        self.cursor_col = 0
 
     def connect_device(self):
         try:
@@ -362,17 +366,10 @@ class MatrixState:
             self.device = None
 
     def clear_device(self):
-        if self.device and self.device.serial.isOpen():
-            for in_port in range(1, 9):
-                for out_port in range(1, 9):
-                    self.device.route(in_port, out_port, False)
-                    sleep(0.005)
-        for i in range(1, 9):
-            for j in range(1, 9):
-                self.matrix[(i, j)] = False
-        save_matrix(self.matrix)
-        self.status_message = "Cleared all"
-        self.status_time = current_time() + 2
+        self.status_message = "Clearing device..."
+        self.status_time = current_time() + 3
+        self._clearing = True
+        self._clear_progress = 0
 
     def toggle_cell(self, row, col):
         if not self.device or not self.device.serial.isOpen():
@@ -395,9 +392,12 @@ class MatrixState:
             self.status_time = current_time() + 1
             return
 
+        all_enabled = all(self.matrix.get((row, c), False) for c in range(1, 9))
+        new_val = not all_enabled
+
         for col in range(1, 9):
-            self.matrix[(row, col)] = True
-            self.device.route(row, col, True)
+            self.matrix[(row, col)] = new_val
+            self.device.route(row, col, new_val)
             sleep(0.005)
         save_matrix(self.matrix)
 
@@ -407,9 +407,12 @@ class MatrixState:
             self.status_time = current_time() + 1
             return
 
+        all_enabled = all(self.matrix.get((r, col), False) for r in range(1, 9))
+        new_val = not all_enabled
+
         for row in range(1, 9):
-            self.matrix[(row, col)] = True
-            self.device.route(row, col, True)
+            self.matrix[(row, col)] = new_val
+            self.device.route(row, col, new_val)
             sleep(0.005)
         save_matrix(self.matrix)
 
@@ -419,10 +422,13 @@ class MatrixState:
             self.status_time = current_time() + 1
             return
 
+        all_enabled = all(self.matrix.get((r, c), False) for r in range(1, 9) for c in range(1, 9))
+        new_val = not all_enabled
+
         for row in range(1, 9):
             for col in range(1, 9):
-                self.matrix[(row, col)] = True
-                self.device.route(row, col, True)
+                self.matrix[(row, col)] = new_val
+                self.device.route(row, col, new_val)
                 sleep(0.005)
         save_matrix(self.matrix)
 
@@ -455,7 +461,7 @@ class MatrixState:
         return self.connect_device()
 
 
-def draw_matrix(stdscr, state):
+def draw_matrix(stdscr, state, help_mode=False):
     curses.curs_set(0)
     stdscr.clear()
 
@@ -491,6 +497,16 @@ def draw_matrix(stdscr, state):
             else:
                 stdscr.addstr(y, x, "[ ]", 0)
 
+    if state.cursor_row == 0:
+        if state.cursor_col == 0:
+            stdscr.addstr(0, 0, "*ALL*", curses.A_REVERSE | curses.A_BOLD)
+        else:
+            x = 4 + (state.cursor_col - 1) * 7
+            stdscr.addstr(0, x, "[>]", curses.A_REVERSE | curses.A_BOLD)
+    elif state.cursor_col == 0 and state.cursor_row > 0:
+        y = state.cursor_row
+        stdscr.addstr(y, 0, f"IN{state.cursor_row}", curses.A_REVERSE | curses.A_BOLD)
+
     status_y = height - 2
 
     conn_status = "Connected" if state.is_connected() else "Disconnected!"
@@ -504,6 +520,21 @@ def draw_matrix(stdscr, state):
     if current_time() < state.status_time:
         stdscr.addstr(status_y + 1, 0, state.status_message, curses.A_BOLD)
 
+    if help_mode:
+        stdscr.attron(curses.color_pair(2) | curses.A_BOLD)
+        stdscr.addstr(2, 4, "CONTROLS", curses.A_BOLD | curses.A_REVERSE)
+        stdscr.addstr(3, 4, "Arrow keys  Navigate matrix")
+        stdscr.addstr(4, 4, "Space      Toggle cell/row/col/all")
+        stdscr.addstr(5, 4, "Home      Go to *ALL* corner")
+        stdscr.addstr(6, 4, "End       Go to opposite corner")
+        stdscr.addstr(7, 4, "c         Clear all")
+        stdscr.addstr(8, 4, "s         Save to patch")
+        stdscr.addstr(9, 4, "l         Load patch")
+        stdscr.addstr(10, 4, "r         Reconnect")
+        stdscr.addstr(11, 4, "q         Quit")
+        stdscr.addstr(13, 4, "Press ? or h to close help...", curses.A_BOLD)
+        stdscr.attroff(curses.color_pair(2) | curses.A_BOLD)
+
     stdscr.refresh()
 
 
@@ -511,6 +542,8 @@ def curses_main(stdscr, port):
     curses.start_color()
     curses.init_pair(1, curses.COLOR_RED, curses.COLOR_BLACK)
     curses.init_pair(2, curses.COLOR_GREEN, curses.COLOR_BLACK)
+
+    height, width = stdscr.getmaxyx()
 
     state = MatrixState(port)
     state.connect_device()
@@ -524,23 +557,63 @@ def curses_main(stdscr, port):
 
     try:
         while True:
-            draw_matrix(stdscr, state)
+            if getattr(state, '_clearing', False):
+                row = state._clear_progress // 8 + 1
+                col = state._clear_progress % 8 + 1
+                if state.device and state.device.serial.isOpen():
+                    state.device.route(row, col, False)
+                state.matrix[(row, col)] = False
+                state._clear_progress += 1
+                if state._clear_progress >= 64:
+                    save_matrix(state.matrix)
+                    del state._clearing
+                    del state._clear_progress
+                    state.status_message = "MIDI routing cleared"
+                    state.status_time = current_time() + 3
+                else:
+                    state.status_message = f"Clearing {row}:{col}..."
+                    state.status_time = current_time() + 1
+                draw_matrix(stdscr, state, help_mode)
+                curses.napms(20)
+                continue
+
+            draw_matrix(stdscr, state, help_mode)
             key = stdscr.getch()
 
             if key == ord('q') or key == ord('Q'):
                 break
 
-            elif key == ord('?'):
-                help_mode = True
+            elif key == ord('?') or key == ord('h') or key == ord('H'):
+                help_mode = not help_mode
+                continue
 
-            elif key == ord('c') or key == ord('C'):
+            if help_mode:
+                help_mode = False
+
+            if key == ord('c') or key == ord('C'):
                 state.clear_device()
+                continue
 
-            elif key == ord('s') or key == ord('S'):
-                patch_mode = True
-                patch_target = 's'
+            if getattr(state, '_clearing', False):
+                row = state._clear_progress // 8 + 1
+                col = state._clear_progress % 8 + 1
+                if state.device and state.device.serial.isOpen():
+                    state.device.route(row, col, False)
+                state.matrix[(row, col)] = False
+                state._clear_progress += 1
+                if state._clear_progress >= 64:
+                    save_matrix(state.matrix)
+                    del state._clearing
+                    del state._clear_progress
+                    state.status_message = "MIDI routing cleared"
+                    state.status_time = current_time() + 3
+                else:
+                    state.status_message = f"Clearing {row}:{col}..."
+                    state.status_time = current_time() + 1
+                curses.napms(20)
+                continue
 
-            elif key == ord('l') or key == ord('L'):
+            if key == ord('l') or key == ord('L'):
                 patch_mode = True
                 patch_target = 'l'
 
@@ -553,15 +626,15 @@ def curses_main(stdscr, port):
                 state.status_time = current_time() + 2
 
             elif key == curses.KEY_HOME:
-                state.cursor_row = 1
-                state.cursor_col = 1
+                state.cursor_row = 0
+                state.cursor_col = 0
 
             elif key == curses.KEY_END:
                 state.cursor_row = 8
                 state.cursor_col = 8
 
             elif key == curses.KEY_UP:
-                if state.cursor_row > 1:
+                if state.cursor_row > 0:
                     state.cursor_row -= 1
 
             elif key == curses.KEY_DOWN:
@@ -569,7 +642,7 @@ def curses_main(stdscr, port):
                     state.cursor_row += 1
 
             elif key == curses.KEY_LEFT:
-                if state.cursor_col > 1:
+                if state.cursor_col > 0:
                     state.cursor_col -= 1
 
             elif key == curses.KEY_RIGHT:
