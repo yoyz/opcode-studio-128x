@@ -277,6 +277,7 @@ def parse_bulk_response(data, size=8):
 
 
 STATE_FILE = os.path.expanduser('~/.opcode_matrix.json')
+NAMING_FILE = os.path.expanduser('~/.opcode_naming.json')
 
 
 def load_matrix():
@@ -300,6 +301,23 @@ def save_matrix(matrix):
     data = {f"{k[0]},{k[1]}": v for k, v in matrix.items()}
     with open(STATE_FILE, 'w') as f:
         json.dump(data, f)
+
+
+def load_naming():
+    """Load IN/OUT naming from file"""
+    if os.path.exists(NAMING_FILE):
+        try:
+            with open(NAMING_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            pass
+    return {'in': {}, 'out': {}}
+
+
+def save_naming(naming):
+    """Save IN/OUT naming to file"""
+    with open(NAMING_FILE, 'w') as f:
+        json.dump(naming, f)
 
 
 def cmd_set(device, in_port, out_port, enable):
@@ -330,12 +348,15 @@ class MatrixState:
         self.port = port
         self.device = None
         self.matrix = load_matrix()
+        self.naming = load_naming()
         self.cursor_row = 1
         self.cursor_col = 1
         self.status_message = ""
         self.status_time = 0
         self.last_reconnect_attempt = 0
         self._redraw_needed = False
+        self._rename_mode = False
+        self._rename_target = None
 
         for i in range(1, 9):
             for j in range(1, 9):
@@ -467,25 +488,31 @@ def draw_matrix(stdscr, state, help_mode=False):
 
     height, width = stdscr.getmaxyx()
 
-    stdscr.addstr(0, 0, "       ", curses.A_BOLD)
-    stdscr.addstr(0, 7, "OUT1 ", curses.A_BOLD)
-    stdscr.addstr(0, 14, "OUT2 ", curses.A_BOLD)
-    stdscr.addstr(0, 21, "OUT3 ", curses.A_BOLD)
-    stdscr.addstr(0, 28, "OUT4 ", curses.A_BOLD)
-    stdscr.addstr(0, 35, "OUT5 ", curses.A_BOLD)
-    stdscr.addstr(0, 42, "OUT6 ", curses.A_BOLD)
-    stdscr.addstr(0, 49, "OUT7 ", curses.A_BOLD)
-    stdscr.addstr(0, 56, "OUT8 ", curses.A_BOLD)
+    in_names = state.naming.get('in', {})
+    out_names = state.naming.get('out', {})
+
+    max_in_len = max(len(in_names.get(str(i), f"IN{i}")) for i in range(1, 9))
+    max_out_len = max(len(out_names.get(str(i), f"OUT{i}")) for i in range(1, 9))
+    max_in_len = max(max_in_len, 3)
+    max_out_len = max(max_out_len, 4, 3)
+
+    cell_width = max(max_out_len + 1, 4)
+    col_start = max_in_len + 1
+
+    stdscr.addstr(0, 0, " " * max_in_len, curses.A_BOLD)
+    for col in range(1, 9):
+        name = out_names.get(str(col), f"OUT{col}")
+        x = col_start + (col - 1) * cell_width
+        stdscr.addstr(0, x, name[:max_out_len].ljust(cell_width), curses.A_BOLD)
 
     for row in range(1, 9):
-        label = f"IN{row}"
-        stdscr.addstr(row, 0, label, curses.A_BOLD)
+        label = in_names.get(str(row), f"IN{row}")
+        stdscr.addstr(row, 0, label[:max_in_len].ljust(max_in_len), curses.A_BOLD)
 
         for col in range(1, 9):
-            x = 4 + (col - 1) * 7
-            y = row
-
             enabled = state.matrix.get((row, col), False)
+            x = col_start + (col - 1) * cell_width
+            y = row
 
             if row == state.cursor_row and col == state.cursor_col:
                 if enabled:
@@ -501,11 +528,12 @@ def draw_matrix(stdscr, state, help_mode=False):
         if state.cursor_col == 0:
             stdscr.addstr(0, 0, "*ALL*", curses.A_REVERSE | curses.A_BOLD)
         else:
-            x = 4 + (state.cursor_col - 1) * 7
+            x = col_start + (state.cursor_col - 1) * cell_width
             stdscr.addstr(0, x, "[>]", curses.A_REVERSE | curses.A_BOLD)
     elif state.cursor_col == 0 and state.cursor_row > 0:
         y = state.cursor_row
-        stdscr.addstr(y, 0, f"IN{state.cursor_row}", curses.A_REVERSE | curses.A_BOLD)
+        in_label = in_names.get(str(state.cursor_row), f"IN{state.cursor_row}")
+        stdscr.addstr(y, 0, in_label, curses.A_REVERSE | curses.A_BOLD)
 
     status_y = height - 2
 
@@ -530,7 +558,7 @@ def draw_matrix(stdscr, state, help_mode=False):
         stdscr.addstr(7, 4, "c         Clear all")
         stdscr.addstr(8, 4, "s         Save to patch")
         stdscr.addstr(9, 4, "l         Load patch")
-        stdscr.addstr(10, 4, "r         Reconnect")
+        stdscr.addstr(10, 4, "r         Rename IN/OUT")
         stdscr.addstr(11, 4, "q         Quit")
         stdscr.addstr(13, 4, "Press ? or h to close help...", curses.A_BOLD)
         stdscr.attroff(curses.color_pair(2) | curses.A_BOLD)
@@ -577,6 +605,56 @@ def curses_main(stdscr, port):
                 curses.napms(20)
                 continue
 
+            if getattr(state, '_rename_mode', False):
+                state._rename_input = state.status_message
+
+                draw_matrix(stdscr, state, help_mode)
+
+                in_names = state.naming.get('in', {})
+                out_names = state.naming.get('out', {})
+
+                y = height // 2
+                stdscr.addstr(y - 1, (width - 30) // 2, "+" + "-" * 28 + "+")
+                stdscr.addstr(y, (width - 30) // 2, "|" + " " * 28 + "|")
+                stdscr.addstr(y, (width - 30) // 2 + 1, state._rename_input[:28].center(28))
+                stdscr.addstr(y + 1, (width - 30) // 2, "|" + " " * 28 + "|")
+                stdscr.addstr(y + 2, (width - 30) // 2, "+" + "-" * 28 + "+")
+                stdscr.addstr(y + 1, (width - 30) // 2 + 1, "Type and press Enter")
+                stdscr.refresh()
+
+                key = stdscr.getch()
+
+                if key in (curses.KEY_ENTER, 10, 13):
+                    new_name = state._rename_input.replace(f"Rename IN{state._rename_target[1]}: ", "").replace(f"Rename OUT{state._rename_target[1]}: ", "").strip()
+                    if new_name:
+                        target_type, target_num = state._rename_target
+                        state.naming[target_type][str(target_num)] = new_name
+                        save_naming(state.naming)
+                        state.status_message = f"Renamed to '{new_name}'"
+                    else:
+                        state.status_message = "Rename cancelled"
+                    state.status_time = current_time() + 3
+                    state._rename_target = None
+                    del state._rename_mode
+                    del state._rename_input
+                    continue
+                elif key == 27:
+                    state.status_message = "Rename cancelled"
+                    state.status_time = current_time() + 3
+                    state._rename_target = None
+                    del state._rename_mode
+                    del state._rename_input
+                    continue
+                elif 32 <= key <= 126:
+                    state._rename_input += chr(key)
+                    state.status_message = state._rename_input
+                    state.status_time = current_time() + 10
+                elif key in (curses.KEY_BACKSPACE, 127, 8):
+                    state._rename_input = state._rename_input[:-1]
+                    state.status_message = state._rename_input
+                    state.status_time = current_time() + 10
+                continue
+
             draw_matrix(stdscr, state, help_mode)
             key = stdscr.getch()
 
@@ -617,13 +695,22 @@ def curses_main(stdscr, port):
                 patch_mode = True
                 patch_target = 'l'
 
-            elif key == ord('r') or key == ord('R'):
-                state.connect_device()
-                if state.is_connected():
-                    state.status_message = "Reconnected"
+            if key == ord('r') or key == ord('R'):
+                if state.cursor_row == 0:
+                    state._rename_target = ('out', state.cursor_col)
+                    state._rename_mode = True
+                    state._rename_input = f"Rename OUT{state.cursor_col}: "
+                    state.status_message = state._rename_input
+                    state.status_time = current_time() + 10
+                elif state.cursor_col == 0:
+                    state._rename_target = ('in', state.cursor_row)
+                    state._rename_mode = True
+                    state._rename_input = f"Rename IN{state.cursor_row}: "
+                    state.status_message = state._rename_input
+                    state.status_time = current_time() + 10
                 else:
-                    state.status_message = "Reconnect failed"
-                state.status_time = current_time() + 2
+                    state.status_message = "Use row/col labels to rename"
+                    state.status_time = current_time() + 2
 
             elif key == curses.KEY_HOME:
                 state.cursor_row = 0
