@@ -280,6 +280,34 @@ STATE_FILE = os.path.expanduser('~/.opcode_matrix.json')
 NAMING_FILE = os.path.expanduser('~/.opcode_naming.json')
 
 
+THEMES = {
+    'default': {
+        'fg': curses.COLOR_GREEN,
+        'enabled': curses.COLOR_GREEN,
+    },
+    'dracula': {
+        'fg': curses.COLOR_MAGENTA,
+        'enabled': curses.COLOR_MAGENTA,
+    },
+    'monokai': {
+        'fg': 2,
+        'enabled': 2,
+    },
+    'solarized': {
+        'fg': curses.COLOR_BLUE,
+        'enabled': curses.COLOR_BLUE,
+    },
+    'nord': {
+        'fg': curses.COLOR_BLUE,
+        'enabled': curses.COLOR_BLUE,
+    },
+    'gruvbox': {
+        'fg': curses.COLOR_YELLOW,
+        'enabled': curses.COLOR_YELLOW,
+    },
+}
+
+
 def load_matrix():
     """Load matrix state from file"""
     if os.path.exists(STATE_FILE):
@@ -320,6 +348,28 @@ def save_naming(naming):
         json.dump(naming, f)
 
 
+THEME_FILE = os.path.expanduser('~/.opcode_theme.json')
+
+
+def load_theme():
+    """Load theme preference from file"""
+    if os.path.exists(THEME_FILE):
+        try:
+            with open(THEME_FILE, 'r') as f:
+                theme = json.load(f)
+                if theme.get('name') in THEMES:
+                    return theme['name']
+        except:
+            pass
+    return 'default'
+
+
+def save_theme(name):
+    """Save theme preference to file"""
+    with open(THEME_FILE, 'w') as f:
+        json.dump({'name': name}, f)
+
+
 def cmd_set(device, in_port, out_port, enable):
     """Set a single routing"""
     device.route(in_port, out_port, bool(enable))
@@ -349,6 +399,7 @@ class MatrixState:
         self.device = None
         self.matrix = load_matrix()
         self.naming = load_naming()
+        self.theme = load_theme()
         self.cursor_row = 1
         self.cursor_col = 1
         self.status_message = ""
@@ -482,7 +533,7 @@ class MatrixState:
         return self.connect_device()
 
 
-def draw_matrix(stdscr, state, help_mode=False):
+def draw_matrix(stdscr, state, theme, help_mode=False):
     curses.curs_set(0)
     stdscr.clear()
 
@@ -490,6 +541,9 @@ def draw_matrix(stdscr, state, help_mode=False):
 
     in_names = state.naming.get('in', {})
     out_names = state.naming.get('out', {})
+
+    enabled_color = theme['enabled']
+    enabled_attr = curses.color_pair(2) | curses.A_BOLD
 
     max_in_len = max(len(in_names.get(str(i), f"IN{i}")) for i in range(1, 9))
     max_out_len = max(len(out_names.get(str(i), f"OUT{i}")) for i in range(1, 9))
@@ -499,41 +553,63 @@ def draw_matrix(stdscr, state, help_mode=False):
     cell_width = max(max_out_len + 1, 4)
     col_start = max_in_len + 1
 
-    stdscr.addstr(0, 0, " " * max_in_len, curses.A_BOLD)
+    enabled_color = theme['enabled']
+    enabled_attr = curses.color_pair(2) | curses.A_BOLD
+
+    max_in_len = max(len(in_names.get(str(i), f"IN{i}")) for i in range(1, 9))
+    max_out_len = max(len(out_names.get(str(i), f"OUT{i}")) for i in range(1, 9))
+    max_in_len = max(max_in_len, 3)
+    max_out_len = max(max_out_len, 4, 3)
+
+    cell_width = max(max_out_len + 1, 4)
+    col_start = max_in_len + 1
+
+    fg_attr = curses.color_pair(2) | curses.A_BOLD
+
+    if state.cursor_row == 0:
+        stdscr.addstr(0, 0, " " * max_in_len, fg_attr)
+    else:
+        stdscr.addstr(0, 0, " " * max_in_len, curses.A_BOLD)
+
     for col in range(1, 9):
         name = out_names.get(str(col), f"OUT{col}")
         x = col_start + (col - 1) * cell_width
-        stdscr.addstr(0, x, name[:max_out_len].ljust(cell_width), curses.A_BOLD)
+        if state.cursor_row == 0 and state.cursor_col == col:
+            stdscr.addstr(0, x, name[:max_out_len].ljust(cell_width), curses.A_REVERSE)
+        else:
+            stdscr.addstr(0, x, name[:max_out_len].ljust(cell_width), fg_attr)
 
     for row in range(1, 9):
         label = in_names.get(str(row), f"IN{row}")
-        stdscr.addstr(row, 0, label[:max_in_len].ljust(max_in_len), curses.A_BOLD)
+        if state.cursor_col == 0 and state.cursor_row == row:
+            stdscr.addstr(row, 0, label[:max_in_len].ljust(max_in_len), curses.A_REVERSE)
+        else:
+            stdscr.addstr(row, 0, label[:max_in_len].ljust(max_in_len), fg_attr)
 
+    for row in range(1, 9):
         for col in range(1, 9):
             enabled = state.matrix.get((row, col), False)
             x = col_start + (col - 1) * cell_width
             y = row
 
-            if row == state.cursor_row and col == state.cursor_col:
+            clearing = getattr(state, '_clearing', False)
+            cell_index = (row - 1) * 8 + (col - 1)
+            is_cleared = clearing and getattr(state, '_clear_progress', 0) > cell_index
+            is_current = clearing and getattr(state, '_clear_progress', 0) == cell_index
+
+            if is_current:
+                stdscr.addstr(y, x, "[*]", curses.A_REVERSE | curses.A_BOLD)
+            elif is_cleared:
+                stdscr.addstr(y, x, "[*]", enabled_attr)
+            elif row == state.cursor_row and col == state.cursor_col:
                 if enabled:
-                    stdscr.addstr(y, x, "[>]", curses.A_REVERSE | curses.A_BOLD)
+                    stdscr.addstr(y, x, "[X]", curses.A_REVERSE)
                 else:
-                    stdscr.addstr(y, x, "[>]", curses.A_REVERSE)
+                    stdscr.addstr(y, x, "[ ]", curses.A_REVERSE)
             elif enabled:
-                stdscr.addstr(y, x, "[X]", curses.A_BOLD)
+                stdscr.addstr(y, x, "[X]", enabled_attr)
             else:
                 stdscr.addstr(y, x, "[ ]", 0)
-
-    if state.cursor_row == 0:
-        if state.cursor_col == 0:
-            stdscr.addstr(0, 0, "*ALL*", curses.A_REVERSE | curses.A_BOLD)
-        else:
-            x = col_start + (state.cursor_col - 1) * cell_width
-            stdscr.addstr(0, x, "[>]", curses.A_REVERSE | curses.A_BOLD)
-    elif state.cursor_col == 0 and state.cursor_row > 0:
-        y = state.cursor_row
-        in_label = in_names.get(str(state.cursor_row), f"IN{state.cursor_row}")
-        stdscr.addstr(y, 0, in_label, curses.A_REVERSE | curses.A_BOLD)
 
     status_y = height - 2
 
@@ -556,9 +632,10 @@ def draw_matrix(stdscr, state, help_mode=False):
         stdscr.addstr(5, 4, "Home      Go to *ALL* corner")
         stdscr.addstr(6, 4, "End       Go to opposite corner")
         stdscr.addstr(7, 4, "c         Clear all")
-        stdscr.addstr(8, 4, "s         Save to patch")
-        stdscr.addstr(9, 4, "l         Load patch")
-        stdscr.addstr(10, 4, "r         Rename IN/OUT")
+        stdscr.addstr(8, 4, "t         Cycle theme")
+        stdscr.addstr(9, 4, "s         Save to patch")
+        stdscr.addstr(10, 4, "l         Load patch")
+        stdscr.addstr(11, 4, "r         Rename IN/OUT")
         stdscr.addstr(11, 4, "q         Quit")
         stdscr.addstr(13, 4, "Press ? or h to close help...", curses.A_BOLD)
         stdscr.attroff(curses.color_pair(2) | curses.A_BOLD)
@@ -567,13 +644,16 @@ def draw_matrix(stdscr, state, help_mode=False):
 
 
 def curses_main(stdscr, port):
+    state = MatrixState(port)
     curses.start_color()
-    curses.init_pair(1, curses.COLOR_RED, curses.COLOR_BLACK)
-    curses.init_pair(2, curses.COLOR_GREEN, curses.COLOR_BLACK)
+    curses.use_default_colors()
+    theme_name = state.theme
+    theme = THEMES[theme_name]
+    curses.init_pair(1, curses.COLOR_RED, -1)
+    curses.init_pair(2, theme['enabled'], -1)
 
     height, width = stdscr.getmaxyx()
 
-    state = MatrixState(port)
     state.connect_device()
 
     if not state.is_connected():
@@ -601,31 +681,33 @@ def curses_main(stdscr, port):
                 else:
                     state.status_message = f"Clearing {row}:{col}..."
                     state.status_time = current_time() + 1
-                draw_matrix(stdscr, state, help_mode)
+                draw_matrix(stdscr, state, theme, help_mode)
                 curses.napms(20)
                 continue
 
             if getattr(state, '_rename_mode', False):
-                state._rename_input = state.status_message
-
-                draw_matrix(stdscr, state, help_mode)
+                draw_matrix(stdscr, state, theme, help_mode)
 
                 in_names = state.naming.get('in', {})
                 out_names = state.naming.get('out', {})
 
+                target_type, target_num = state._rename_target
+                prompt = f"Rename {'OUT' if target_type == 'out' else 'IN'}{target_num}"
+                current_value = state._rename_input
+
                 y = height // 2
                 stdscr.addstr(y - 1, (width - 30) // 2, "+" + "-" * 28 + "+")
                 stdscr.addstr(y, (width - 30) // 2, "|" + " " * 28 + "|")
-                stdscr.addstr(y, (width - 30) // 2 + 1, state._rename_input[:28].center(28))
+                stdscr.addstr(y, (width - 30) // 2 + 1, current_value[:28].ljust(28))
                 stdscr.addstr(y + 1, (width - 30) // 2, "|" + " " * 28 + "|")
                 stdscr.addstr(y + 2, (width - 30) // 2, "+" + "-" * 28 + "+")
-                stdscr.addstr(y + 1, (width - 30) // 2 + 1, "Type and press Enter")
+                stdscr.addstr(y + 1, (width - 30) // 2 + 1, f"{prompt}... Press Enter", curses.A_BOLD)
                 stdscr.refresh()
 
                 key = stdscr.getch()
 
                 if key in (curses.KEY_ENTER, 10, 13):
-                    new_name = state._rename_input.replace(f"Rename IN{state._rename_target[1]}: ", "").replace(f"Rename OUT{state._rename_target[1]}: ", "").strip()
+                    new_name = state._rename_input.strip()
                     if new_name:
                         target_type, target_num = state._rename_target
                         state.naming[target_type][str(target_num)] = new_name
@@ -635,15 +717,13 @@ def curses_main(stdscr, port):
                         state.status_message = "Rename cancelled"
                     state.status_time = current_time() + 3
                     state._rename_target = None
-                    del state._rename_mode
-                    del state._rename_input
+                    state._rename_mode = False
                     continue
                 elif key == 27:
                     state.status_message = "Rename cancelled"
                     state.status_time = current_time() + 3
                     state._rename_target = None
-                    del state._rename_mode
-                    del state._rename_input
+                    state._rename_mode = False
                     continue
                 elif 32 <= key <= 126:
                     state._rename_input += chr(key)
@@ -655,7 +735,7 @@ def curses_main(stdscr, port):
                     state.status_time = current_time() + 10
                 continue
 
-            draw_matrix(stdscr, state, help_mode)
+            draw_matrix(stdscr, state, theme, help_mode)
             key = stdscr.getch()
 
             if key == ord('q') or key == ord('Q'):
@@ -670,6 +750,18 @@ def curses_main(stdscr, port):
 
             if key == ord('c') or key == ord('C'):
                 state.clear_device()
+                continue
+
+            if key == ord('t') or key == ord('T'):
+                theme_names = list(THEMES.keys())
+                current_idx = theme_names.index(state.theme)
+                next_idx = (current_idx + 1) % len(theme_names)
+                state.theme = theme_names[next_idx]
+                save_theme(state.theme)
+                theme = THEMES[state.theme]
+                curses.init_pair(2, theme['enabled'], -1)
+                state.status_message = f"Theme: {state.theme}"
+                state.status_time = current_time() + 2
                 continue
 
             if getattr(state, '_clearing', False):
@@ -697,16 +789,18 @@ def curses_main(stdscr, port):
 
             if key == ord('r') or key == ord('R'):
                 if state.cursor_row == 0:
+                    current_name = state.naming.get('out', {}).get(str(state.cursor_col), f"OUT{state.cursor_col}")
                     state._rename_target = ('out', state.cursor_col)
                     state._rename_mode = True
-                    state._rename_input = f"Rename OUT{state.cursor_col}: "
-                    state.status_message = state._rename_input
+                    state._rename_input = current_name
+                    state.status_message = f"Rename OUT{state.cursor_col}: {current_name}"
                     state.status_time = current_time() + 10
                 elif state.cursor_col == 0:
+                    current_name = state.naming.get('in', {}).get(str(state.cursor_row), f"IN{state.cursor_row}")
                     state._rename_target = ('in', state.cursor_row)
                     state._rename_mode = True
-                    state._rename_input = f"Rename IN{state.cursor_row}: "
-                    state.status_message = state._rename_input
+                    state._rename_input = current_name
+                    state.status_message = f"Rename IN{state.cursor_row}: {current_name}"
                     state.status_time = current_time() + 10
                 else:
                     state.status_message = "Use row/col labels to rename"
